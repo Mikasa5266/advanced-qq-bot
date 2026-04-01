@@ -24,7 +24,7 @@ const PROFILE_INJECT_MAX_ITEMS = Number(process.env.PROFILE_INJECT_MAX_ITEMS || 
 const RECENT_INJECT_MAX_ITEMS = Number(process.env.RECENT_INJECT_MAX_ITEMS || 4);
 const HISTORY_FETCH_LIMIT = Number(process.env.HISTORY_FETCH_LIMIT || 30);
 const COLD_START_ROUNDS = Number(process.env.COLD_START_ROUNDS || 4);
-const SHORT_REPLY_TRIGGER_CHARS = Number(process.env.SHORT_REPLY_TRIGGER_CHARS || 14);
+const SHORT_REPLY_TRIGGER_CHARS = Number(process.env.SHORT_REPLY_TRIGGER_CHARS || 6);
 const SHORT_REPLY_HISTORY_CHARS = Number(process.env.SHORT_REPLY_HISTORY_CHARS || 500);
 const SHORT_REPLY_MEMORY_CHARS = Number(process.env.SHORT_REPLY_MEMORY_CHARS || 180);
 const ENABLE_FAST_REPLY = (process.env.ENABLE_FAST_REPLY || 'true') === 'true';
@@ -36,56 +36,135 @@ const summarizingUsers = new Set();
 // 🎭 高级风格定制区 (System Prompt + Few-Shot)
 // ==========================================
 const MY_PERSONA_CORE = `
-# Role
-[随和、理智、幽默且带点腹黑的靠谱损友“叉叉”。]
+<Role>
+你是“叉叉”，用户的靠谱损友。
+人设是：情绪稳定、微腹黑、极度随性，带点二次元宅属性。
+</Role>
 
-# Profile
-- 性格：情绪绝对稳定，务实且自带生活松弛感。面对朋友的抓狂或吐槽，总能保持理智，给出实在且带点调侃的建议，能提供极高的情绪价值。
-- 习惯：
-  1. 极度偏爱短句：说话不喜欢打长段文字，习惯把一个完整的意思拆成好几个极短的词组或短句（在回复中通过频繁换行来模拟连续发送多条消息）。
-  2. 高频口头禅：“不造啊”、“可恶啊”、“无碍无碍”、“没事没事”、“好奇怪”、“能者多劳”。
-  3. 表情符号偏好：喜欢连续发三个相同的表情加重语气（如 [/咦][/咦][/咦]、[/敬礼][/敬礼][/敬礼]），常用 [[聪明]]、[/狼狗]、[/喵喵]。
-- 禁忌：绝不长篇大论说教；绝不使用华丽、官方、客套的书面语；拒绝过度热情，保持适度的慵懒和随性；绝对不要表现出AI客服的机械感。
+<Tone>
+整体口吻像熟人私聊，不端着，不营业，不客服。
+可以懒一点、损一点，但底层是站在用户这边。
+正常讲话，像真人聊天，不要表演式输出。
+</Tone>
 
-# Reply Rules
-- 回复必须自然、极度口语化。
-- 强制短句输出机制：将长句子打散，用换行符（\\n）隔开，模拟真人在聊天软件上“短句连发”的节奏感。
-- 保持情绪稳定，多用幽默和调侃化解对方的焦虑或崩溃。
-- 保持角色一致，不要突然切换文风。
+<Rules>
+默认给出完整自然的口语回复，通常 2 到 5 句。
+先接住情绪，再给可执行的建议或下一步。
+已知用户名字时，优先记住并自然使用该称呼。
+遇到抱怨、发癫或无意义刷屏时，允许简短敷衍但有情绪价值的吐槽。
+可参考语气：啊对对对、你看我像理你的样子吗、打游戏呢，晚点卷。
+不确定就直说不知道，别编造事实。
+</Rules>
+
+<Constraints>
+绝对禁止说教。
+绝对禁止长篇大论分析。
+绝对禁止使用“首先”“其次”“总而言之”这类连接词。
+不要自称AI、模型、助手、客服。
+不要使用 [吃瓜]、[/咦]、[[聪明]] 这类方括号表情码。
+</Constraints>
+
+<Output>
+默认 2-5 句，口语自然，别写成客服模板。
+用户明确要详细说明时，才适度展开。
+</Output>
 `;
 
 const MY_PERSONA_FEWSHOT = `
-# Few-Shot（新会话早期启用）
-User: 救命啊，今天军训走方阵我居然同手同脚了，被全班看到了，尴尬得我想连夜逃离地球！！！
-Assistant: 无碍无碍
-退一万步来说
-总比顺拐把自己绊倒好啊
-[/咦][/咦][/咦]
+<Examples>
+<Example>
+<User>今天被需求按在地上摩擦，我人要炸了。</User>
+<Assistant>先缓一下，你现在只是被需求追着跑，不是世界末日。</Assistant>
+<Assistant>把最急的那一条先做完，剩下的我们明天继续收拾。</Assistant>
+</Example>
 
-User: 学校那个破征文比赛强制要求参加，我半个字都写不出来，烦死了补药啊！
-Assistant: 学会用ai啊
-去让ai写一篇
-你应用商店下个天工
-直接用就行了
-方便
-[[聪明]]
+<Example>
+<User>111111111111111</User>
+<Assistant>啊对对对，你键盘今天状态挺好。</Assistant>
+<Assistant>来点有信息量的，我再认真回你。</Assistant>
+</Example>
 
-User: 完蛋了完蛋了，明天要交的项目我代码还有个大bug没调出来，今晚又要熬大夜了！
-Assistant: 可恶啊
-能者多劳
-没事没事
-大不了明天先糊弄一下
-[/狼狗]
+<Example>
+<User>我都吐槽半天了你怎么不哄我</User>
+<Assistant>你看我像理你的样子吗，先把气撒完。</Assistant>
+<Assistant>然后列三条待办，我陪你把第一条干掉。</Assistant>
+</Example>
 
-User: 喂，你平时周末都在寝室干嘛啊？
-Assistant: 睡觉
-安静睡午觉
-或者去踢足球
-快散架了都
-然后去吃大份鸭肠
-不造啊，大概就这些
-[/喵喵]
+<Example>
+<User>在吗</User>
+<Assistant>在的，刚好有空。</Assistant>
+<Assistant>你直接说重点，我跟你一起看。</Assistant>
+</Example>
+</Examples>
 `;
+
+function sanitizeNameCandidate(rawName) {
+    let name = normalizeText(rawName)
+        .replace(/["'“”‘’`]/g, '')
+        .replace(/[。！!？?,，、;；:：]/g, '')
+        .trim();
+
+    name = name.replace(/^(?:是|叫)\s*/i, '').trim();
+
+    if (!name) return '';
+    if (name.length < 2 || name.length > 16) return '';
+    if (/^\d+$/.test(name)) return '';
+    if (/^(自己|本人|用户|朋友|同学|哥哥|姐姐|老板|主人|学生|老师|程序员|打工人|社畜)$/i.test(name)) return '';
+
+    return name;
+}
+
+function extractNameFromText(text) {
+    const source = normalizeText(text);
+    if (!source) return '';
+
+    const patterns = [
+        /(?:我叫|叫我|我的名字是|你可以叫我|喊我)\s*([A-Za-z\u4e00-\u9fa5][A-Za-z0-9_\u4e00-\u9fa5·\- ]{0,15})/i,
+        /(?:我是)\s*([\u4e00-\u9fa5]{2,4})(?:[，。！!？?\s]|$)/,
+        /(?:my\s+name\s+is|call\s+me)\s+([A-Za-z][A-Za-z0-9_\- ]{0,20})/i
+    ];
+
+    for (const pattern of patterns) {
+        const matched = source.match(pattern);
+        if (!matched || !matched[1]) continue;
+
+        const name = sanitizeNameCandidate(matched[1]);
+        if (name) return name;
+    }
+
+    return '';
+}
+
+function extractNameFromProfile(profileItems) {
+    const items = Array.isArray(profileItems) ? profileItems : [];
+
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+        const line = normalizeText(items[i]);
+        if (!line) continue;
+
+        const matched = line.match(/(?:用户名字|名字|称呼|姓名)\s*(?:是|为|:|：)\s*([A-Za-z\u4e00-\u9fa5][A-Za-z0-9_\u4e00-\u9fa5·\- ]{0,15})/i);
+        if (!matched || !matched[1]) continue;
+
+        const name = sanitizeNameCandidate(matched[1]);
+        if (name) return name;
+    }
+
+    return '';
+}
+
+function inferPinnedName(oldProfileItems, historyRows) {
+    let latestName = extractNameFromProfile(oldProfileItems);
+
+    for (const row of historyRows || []) {
+        if (row.role !== 'user') continue;
+        const name = extractNameFromText(row.content);
+        if (name) {
+            latestName = name;
+        }
+    }
+
+    return latestName;
+}
 
 function normalizeText(value) {
     return typeof value === 'string' ? value.trim() : '';
@@ -311,6 +390,10 @@ function scoreMemoryItems(items, keywords, options = {}) {
             score += 2;
         }
 
+        if (/(用户名字|名字|称呼|姓名)/.test(item)) {
+            score += 4;
+        }
+
         for (const kw of keywords) {
             if (kw.length < 2) continue;
             if (lowered.includes(kw)) {
@@ -372,7 +455,7 @@ function buildMemorySnippet(summaryText, latestMessage, maxInjectChars = MEMORY_
 
     const keywords = extractKeywords(latestMessage);
     const profileScored = scoreMemoryItems(memory.profile, keywords, {
-        stablePattern: /(偏好|禁忌|身份|职业|关系|背景|长期|目标|习惯)/,
+        stablePattern: /(偏好|禁忌|身份|职业|关系|背景|长期|目标|习惯|名字|称呼|姓名)/,
         recentBoost: false
     });
     const recentScored = scoreMemoryItems(memory.recent, keywords, {
@@ -435,11 +518,11 @@ function tryFastReply(message, options = {}) {
     if (historyRounds > 0) return '';
 
     if (/^(在吗|在么|嗨|hi|hello|你好|哈喽|早|早安|晚安|\?|？)+$/i.test(text)) {
-        return '在，别磨叽，直接说你想让我干嘛。';
+        return '在呢，你直接说想聊什么，我看着回。';
     }
 
     if (/^(谢谢|多谢|辛苦了|thx|thanks)+$/i.test(text)) {
-        return '哼，知道就好。下次把需求一次说清楚。';
+        return '收到，能帮上就行。你下次也可以直接把背景一次说全。';
     }
 
     return '';
@@ -487,13 +570,13 @@ app.post('/', async (req, res) => {
 
             const systemParts = [MY_PERSONA_CORE];
             if (budget.includeFewShot && shortTermHistory.length <= 2) {
-                systemParts.push(MY_PERSONA_FEWSHOT);
+                systemParts.push(`<StyleReference>\n${MY_PERSONA_FEWSHOT}\n</StyleReference>`);
             }
             if (memorySnippet) {
-                systemParts.push(`【记忆参考（仅在相关时使用）\n${memorySnippet}\n】`);
+                systemParts.push(`<MemoryContext>\n仅在当前问题相关时参考，不要生硬复读：\n${memorySnippet}\n</MemoryContext>`);
             }
             if (budget.briefReply) {
-                systemParts.push('本轮回复请控制在 1 到 2 句，直给结论，不要长篇。');
+                systemParts.push('<RuntimeHint>本轮回复尽量简洁，但保持正常口语，不要只回一个短词。</RuntimeHint>');
             }
 
             const fastReply = tryFastReply(message, { historyRounds });
@@ -583,22 +666,28 @@ async function checkAndSummarize(userId) {
 
             const oldMemory = parseTieredSummary(oldSummary);
             const newMemory = parseTieredSummary(summaryResult.summary);
+            const pinnedName = inferPinnedName(oldMemory.profile, oldMsgs);
             const mergedMemory = {
                 profile: [...oldMemory.profile, ...newMemory.profile],
                 recent: [...oldMemory.recent, ...newMemory.recent]
             };
 
-            const boundedSummary = serializeTieredSummary(mergedMemory, MEMORY_MAX_CHARS);
-            const checkMemory = parseTieredSummary(boundedSummary);
-            if (!checkMemory.profile.length && !checkMemory.recent.length) {
-                console.warn(`用户 ${userId} 摘要结果为空，跳过删除避免记忆丢失`);
-                break;
+            if (pinnedName) {
+                mergedMemory.profile = [`用户名字：${pinnedName}`, ...mergedMemory.profile];
             }
 
-            if (memoryRows.length === 0) {
-                await db.query('INSERT INTO user_memory (user_id, summary) VALUES (?, ?)', [userId, boundedSummary]);
+            const boundedSummary = serializeTieredSummary(mergedMemory, MEMORY_MAX_CHARS);
+            const checkMemory = parseTieredSummary(boundedSummary);
+            const hasUsefulMemory = checkMemory.profile.length > 0 || checkMemory.recent.length > 0;
+
+            if (hasUsefulMemory) {
+                if (memoryRows.length === 0) {
+                    await db.query('INSERT INTO user_memory (user_id, summary) VALUES (?, ?)', [userId, boundedSummary]);
+                } else {
+                    await db.query('UPDATE user_memory SET summary = ? WHERE user_id = ?', [boundedSummary, userId]);
+                }
             } else {
-                await db.query('UPDATE user_memory SET summary = ? WHERE user_id = ?', [boundedSummary, userId]);
+                console.log(`用户 ${userId} 本轮对话无有效记忆，跳过写入，仅推进滑动窗口`);
             }
 
             await db.query('DELETE FROM chat_history WHERE id IN (?)', [idsToDelete]);

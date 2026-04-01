@@ -77,10 +77,12 @@ async function summarizeDialogue(dialogueText, previousSummary, options = {}) {
     "recent": ["..."]
 }
 2. profile 仅放长期稳定信息（身份背景、偏好、禁忌、长期目标），最多 ${profileMaxItems} 条。
-3. recent 仅放近期有效事件（最近发生的事、当前项目进展、短期计划），最多 ${recentMaxItems} 条。
-4. 每条尽量短，建议不超过 40 字，去重，不写废话。
-5. 总长度尽量控制在 ${maxChars} 字以内。
-6. 如果没有新增有效信息，请尽量保留旧记忆中的有效条目。
+3. 若已知用户名字/称呼，必须保留在 profile，建议格式："用户名字：xxx"，并放在前面。
+4. 若新对话里用户明确自报名字（如“我叫xxx”“叫我xxx”），要覆盖旧名字，使用最新称呼。
+5. recent 仅放近期有效事件（最近发生的事、当前项目进展、短期计划），最多 ${recentMaxItems} 条。
+6. 每条尽量短，建议不超过 40 字，去重，不写废话。
+7. 总长度尽量控制在 ${maxChars} 字以内。
+8. 如果没有新增有效信息，请尽量保留旧记忆中的有效条目。
 
 【旧记忆(JSON或文本)】：${previousSummary || '无'}
 
