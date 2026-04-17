@@ -2,7 +2,12 @@ const axios = require("axios");
 
 const BAILIAN_BASE_URL =
   process.env.BAILIAN_BASE_URL || "https://dashscope.aliyuncs.com";
-const BAILIAN_TIMEOUT_MS = Number(process.env.BAILIAN_TIMEOUT_MS || 20000);
+const BAILIAN_TIMEOUT_MS = Math.max(
+  60000,
+  Number(process.env.BAILIAN_TIMEOUT_MS || 60000),
+);
+const BAILIAN_ENABLE_STREAM =
+  (process.env.BAILIAN_ENABLE_STREAM || "true") === "true";
 
 const BAILIAN_API_KEY = process.env.BAILIAN_API_KEY || "";
 const BAILIAN_APP_ID = process.env.BAILIAN_APP_ID || "";
@@ -25,6 +30,9 @@ const PROFILE_QUERY_PATH =
 const MEMORY_TOP_K = Number(process.env.BAILIAN_MEMORY_TOP_K || 8);
 const MEMORY_MIN_SCORE = Number(process.env.BAILIAN_MEMORY_MIN_SCORE || 0.3);
 
+// Keep short-term conversation continuity per QQ user.
+const userSessionStore = new Map();
+
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -33,6 +41,28 @@ function ensureApiKey() {
   if (!BAILIAN_API_KEY) {
     throw new Error("缺少环境变量 BAILIAN_API_KEY");
   }
+}
+
+function getStoredSessionId(userId) {
+  const normalizedUserId = normalizeText(userId);
+  if (!normalizedUserId) return "";
+  return normalizeText(userSessionStore.get(normalizedUserId) || "");
+}
+
+function saveStoredSessionId(userId, sessionId) {
+  const normalizedUserId = normalizeText(userId);
+  const normalizedSessionId = normalizeText(sessionId);
+  if (!normalizedUserId || !normalizedSessionId) return;
+
+  userSessionStore.set(normalizedUserId, normalizedSessionId);
+}
+
+function extractSessionIdFromCompletion(payload) {
+  return normalizeText(
+    (payload && payload.output && payload.output.session_id) ||
+      (payload && payload.output && payload.output.sessionId) ||
+      (payload && payload.session_id),
+  );
 }
 
 function buildPath(template, replacements = {}) {
@@ -57,6 +87,14 @@ function safeJsonStringify(value) {
     return JSON.stringify(value, null, 2);
   } catch (_) {
     return String(value);
+  }
+}
+
+function clonePlainObject(value) {
+  try {
+    return JSON.parse(JSON.stringify(value || {}));
+  } catch (_) {
+    return value || {};
   }
 }
 
@@ -374,9 +412,110 @@ function resolveErrorMessage(error) {
   return error.message || "unknown error";
 }
 
-async function requestPost(pathTemplate, payload, replacements = {}) {
+function buildMemoryAddMessages(userMessage, assistantMessage) {
+  const normalizedUserMessage = normalizeText(userMessage);
+  const normalizedAssistantMessage = normalizeText(assistantMessage);
+
+  const messages = [];
+  if (normalizedUserMessage) {
+    messages.push({ role: "user", content: normalizedUserMessage });
+  }
+  if (normalizedAssistantMessage) {
+    messages.push({ role: "assistant", content: normalizedAssistantMessage });
+  }
+
+  return messages;
+}
+
+async function parseSseResponse(readable) {
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    const dataLines = [];
+    let lastJson = null;
+
+    const handleLine = (rawLine) => {
+      const line = normalizeText(rawLine);
+      if (!line || !line.startsWith("data:")) {
+        return;
+      }
+
+      const data = normalizeText(line.slice(5));
+      if (!data || data === "[DONE]") {
+        return;
+      }
+
+      dataLines.push(data);
+      try {
+        lastJson = JSON.parse(data);
+      } catch (_) {
+        // Some chunks are not standalone JSON; keep buffering.
+      }
+    };
+
+    readable.setEncoding("utf8");
+    readable.on("data", (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+      lines.forEach(handleLine);
+    });
+
+    readable.on("end", () => {
+      if (buffer) {
+        buffer.split(/\r?\n/).forEach(handleLine);
+      }
+
+      if (lastJson) {
+        resolve(lastJson);
+        return;
+      }
+
+      const lastDataLine = normalizeText(dataLines[dataLines.length - 1] || "");
+      if (lastDataLine) {
+        resolve({ output: { text: lastDataLine } });
+        return;
+      }
+
+      resolve({});
+    });
+
+    readable.on("error", (error) => reject(error));
+  });
+}
+
+async function requestPost(
+  pathTemplate,
+  payload,
+  replacements = {},
+  options = {},
+) {
   const path = buildPath(pathTemplate, replacements);
   const url = `${BAILIAN_BASE_URL}${path}`;
+
+  if (options.stream) {
+    const streamPayload = clonePlainObject(payload);
+    if (
+      !streamPayload.parameters ||
+      typeof streamPayload.parameters !== "object"
+    ) {
+      streamPayload.parameters = {};
+    }
+    streamPayload.parameters.stream = true;
+
+    const response = await axios.post(url, streamPayload, {
+      headers: {
+        ...getCommonHeaders(),
+        Accept: "text/event-stream",
+        "X-DashScope-SSE": "enable",
+      },
+      timeout: BAILIAN_TIMEOUT_MS,
+      responseType: "stream",
+    });
+
+    const parsed = await parseSseResponse(response.data);
+    logRawBailianResponse("POST_STREAM", url, parsed);
+    return parsed;
+  }
 
   const response = await axios.post(url, payload, {
     headers: getCommonHeaders(),
@@ -515,6 +654,7 @@ function buildPromptWithContext(options = {}) {
 }
 
 async function callAgentAppWithMemory(options = {}) {
+  const userId = normalizeText(options.userId);
   const userMessage = normalizeText(options.userMessage);
   if (!userMessage) return "";
 
@@ -530,6 +670,8 @@ async function callAgentAppWithMemory(options = {}) {
     profile: options.profile,
   });
 
+  const storedSessionId = getStoredSessionId(userId);
+
   const payload = {
     input: {
       prompt,
@@ -537,9 +679,43 @@ async function callAgentAppWithMemory(options = {}) {
     parameters: {},
   };
 
-  const result = await requestPost(AGENT_COMPLETION_PATH, payload, {
-    app_id: BAILIAN_APP_ID,
-  });
+  if (storedSessionId) {
+    payload.input.session_id = storedSessionId;
+    console.log(
+      `[Bailian SESSION] carry input.session_id for user=${userId} session_id=${storedSessionId}`,
+    );
+  }
+
+  let result;
+  if (BAILIAN_ENABLE_STREAM) {
+    try {
+      result = await requestPost(
+        AGENT_COMPLETION_PATH,
+        payload,
+        { app_id: BAILIAN_APP_ID },
+        { stream: true },
+      );
+    } catch (error) {
+      console.warn(
+        `[Bailian STREAM] stream request failed, fallback to normal request: ${resolveErrorMessage(error)}`,
+      );
+      result = await requestPost(AGENT_COMPLETION_PATH, payload, {
+        app_id: BAILIAN_APP_ID,
+      });
+    }
+  } else {
+    result = await requestPost(AGENT_COMPLETION_PATH, payload, {
+      app_id: BAILIAN_APP_ID,
+    });
+  }
+
+  const newSessionId = extractSessionIdFromCompletion(result);
+  if (newSessionId) {
+    saveStoredSessionId(userId, newSessionId);
+    console.log(
+      `[Bailian SESSION] save output.session_id for user=${userId} session_id=${newSessionId}`,
+    );
+  }
 
   return extractAgentReply(result);
 }
@@ -549,16 +725,14 @@ async function writeConversationMemory(options = {}) {
   const userMessage = normalizeText(options.userMessage);
   const assistantMessage = normalizeText(options.assistantMessage);
 
-  if (!userId || !userMessage || !assistantMessage) {
+  const messages = buildMemoryAddMessages(userMessage, assistantMessage);
+  if (!userId || messages.length === 0) {
     return { ok: false, skipped: true };
   }
 
   const payload = {
     user_id: userId,
-    messages: [
-      { role: "user", content: userMessage },
-      { role: "assistant", content: assistantMessage },
-    ],
+    messages,
   };
 
   if (BAILIAN_MEMORY_LIBRARY_ID) {
@@ -569,7 +743,21 @@ async function writeConversationMemory(options = {}) {
     payload.profile_schema = BAILIAN_PROFILE_TEMPLATE_ID;
   }
 
-  return requestPost(MEMORY_ADD_PATH, payload);
+  console.log(`[Bailian MEMORY_ADD PAYLOAD] ${safeJsonStringify(payload)}`);
+
+  const result = await requestPost(MEMORY_ADD_PATH, payload);
+  const memoryNodes =
+    (result && result.memory_nodes) ||
+    (result && result.output && result.output.memory_nodes) ||
+    [];
+
+  if (Array.isArray(memoryNodes) && memoryNodes.length === 0) {
+    console.warn(
+      "[Bailian MEMORY_ADD] memory_nodes is empty, please verify memory library config and API-side memory strategy.",
+    );
+  }
+
+  return result;
 }
 
 module.exports = {

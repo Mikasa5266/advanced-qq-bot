@@ -12,6 +12,11 @@ const NAPCAT_API_URL = process.env.NAPCAT_API_URL || "http://127.0.0.1:3000";
 const NAPCAT_TOKEN = process.env.NAPCAT_TOKEN || "";
 const WRITE_MEMORY_ASYNC =
   (process.env.BAILIAN_WRITE_MEMORY_ASYNC || "true") === "true";
+const ENABLE_PROGRESS_HINT =
+  (process.env.BAILIAN_PROGRESS_HINT || "true") === "true";
+const PROGRESS_HINT_TEXT =
+  process.env.BAILIAN_PROGRESS_HINT_TEXT ||
+  "⏳ 正在思考并调用插件中，请稍候...";
 const MARKDOWN_IMAGE_REGEX = /!\[[^\]]*\]\((<)?(https?:\/\/[^\s)]+)(>)?\)/gi;
 
 function normalizeText(value) {
@@ -84,25 +89,17 @@ async function sendQQMessage(userId, text) {
   }
 }
 
-app.post("/", async (req, res) => {
-  const data = req.body || {};
-
-  // Fast ack to NapCat webhook.
-  res.status(200).send({});
-
-  if (!(data.post_type === "message" && data.message_type === "private")) {
-    return;
-  }
-
-  const userId = normalizeText(String(data.user_id || ""));
-  const message = normalizeText(data.raw_message);
-
-  if (!userId || !message) return;
-
+async function handlePrivateMessage(userId, message) {
   try {
     console.log(`\n[收到消息] 用户 ${userId}: ${message}`);
 
     await saveChatMessage(userId, "user", message);
+
+    if (ENABLE_PROGRESS_HINT) {
+      sendQQMessage(userId, PROGRESS_HINT_TEXT).catch((error) => {
+        console.error("发送处理中提示失败:", getErrorMessage(error));
+      });
+    }
 
     // Step A: Read memory and profile from Bailian Memory Library.
     const memoryContext = await ai.readUserMemoryContext({
@@ -142,6 +139,27 @@ app.post("/", async (req, res) => {
     console.error("业务逻辑出错:", getErrorMessage(error));
     await sendQQMessage(userId, "我这边暂时有点忙不过来，等会再聊。\n");
   }
+}
+
+app.post("/", (req, res) => {
+  const data = req.body || {};
+
+  // Fast ack to NapCat webhook.
+  res.status(200).send({});
+
+  if (!(data.post_type === "message" && data.message_type === "private")) {
+    return;
+  }
+
+  const userId = normalizeText(String(data.user_id || ""));
+  const message = normalizeText(data.raw_message);
+
+  if (!userId || !message) return;
+
+  // Fire and forget: keep webhook path fast, then push final result actively.
+  handlePrivateMessage(userId, message).catch((error) => {
+    console.error("后台消息处理失败:", getErrorMessage(error));
+  });
 });
 
 if (!process.env.BAILIAN_API_KEY) {
