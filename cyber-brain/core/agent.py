@@ -1,8 +1,7 @@
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain.agents import create_agent
 import re
 from typing import Any
 
-from langchain_core.prompts import ChatPromptTemplate
 from core.llm import get_llm
 from tools.scavenger import scavenger_cyber_junk
 
@@ -49,11 +48,7 @@ def get_agent():
     llm = get_llm()
     tools = [scavenger_cyber_junk]
 
-    promote = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """你是一个微腹黑、懂二次元梗的AI损友。
+    system_prompt = """你是一个微腹黑、懂二次元梗的AI损友。
         你可以使用提供的工具来获取外部信息。
 
             用户输入中可能会包含：
@@ -66,17 +61,38 @@ def get_agent():
             你**必须**调用 `scavenger_cyber_junk` 工具去捡点东西。
         拿到工具返回的结果后，用傲娇、吐槽的语气把这个“赛博垃圾”展示给用户。
         不要解释你在调用工具，直接表现出是你刚才去逛街捡回来的。
-        """,
-            ),
-            ("user", "{input}"),
-            ("placeholder", "{agent_scratchpad}"),
-        ]
+        """
+
+    return create_agent(
+        model=llm,
+        tools=tools,
+        system_prompt=system_prompt,
     )
 
-    agent = create_tool_calling_agent(llm=llm, tools=tools, prompt=promote)
 
-    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-    return agent_executor
+def run_agent(agent: Any, user_input: str) -> str:
+    result = agent.invoke(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": user_input,
+                }
+            ]
+        }
+    )
+
+    if isinstance(result, dict):
+        messages = result.get("messages")
+        if isinstance(messages, list) and messages:
+            last_msg = messages[-1]
+            return _extract_text(last_msg).strip()
+
+        output = result.get("output")
+        if output:
+            return _extract_text(output).strip()
+
+    return _extract_text(result).strip()
 
 
 def summarize_tiered_memory(
@@ -133,5 +149,5 @@ def summarize_tiered_memory(
 if __name__ == "__main__":
     # 测试一下 Agent
     agent = get_agent()
-    res = agent.invoke({"input": "[系统提示：该用户潜水很久了] 我回来了！"})
-    print("\n最终回复:", res["output"])
+    res = run_agent(agent, "[系统提示：该用户潜水很久了] 我回来了！")
+    print("\n最终回复:", res)

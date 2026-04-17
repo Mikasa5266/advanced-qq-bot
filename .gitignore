@@ -1,0 +1,20 @@
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Local environment files
+.env
+*.env
+
+# Runtime logs
+logs/
+*.log
+
+# Vector store and local data outputs
+data/
