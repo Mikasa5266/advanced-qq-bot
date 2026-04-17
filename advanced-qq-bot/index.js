@@ -17,6 +17,10 @@ const ENABLE_PROGRESS_HINT =
 const PROGRESS_HINT_TEXT =
   process.env.BAILIAN_PROGRESS_HINT_TEXT ||
   "⏳ 正在思考并调用插件中，请稍候...";
+const PROGRESS_HINT_DELAY_MS = Math.max(
+  0,
+  Number(process.env.BAILIAN_PROGRESS_HINT_DELAY_MS || 1500),
+);
 const MARKDOWN_IMAGE_REGEX = /!\[[^\]]*\]\((<)?(https?:\/\/[^\s)]+)(>)?\)/gi;
 
 function normalizeText(value) {
@@ -89,17 +93,40 @@ async function sendQQMessage(userId, text) {
   }
 }
 
+function createProgressHintController(userId) {
+  let timer = null;
+  let canceled = false;
+
+  return {
+    start() {
+      if (!ENABLE_PROGRESS_HINT || PROGRESS_HINT_DELAY_MS <= 0) return;
+
+      timer = setTimeout(() => {
+        if (canceled) return;
+
+        sendQQMessage(userId, PROGRESS_HINT_TEXT).catch((error) => {
+          console.error("发送处理中提示失败:", getErrorMessage(error));
+        });
+      }, PROGRESS_HINT_DELAY_MS);
+    },
+    cancel() {
+      canceled = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
+}
+
 async function handlePrivateMessage(userId, message) {
+  const progressHint = createProgressHintController(userId);
+  progressHint.start();
+
   try {
     console.log(`\n[收到消息] 用户 ${userId}: ${message}`);
 
     await saveChatMessage(userId, "user", message);
-
-    if (ENABLE_PROGRESS_HINT) {
-      sendQQMessage(userId, PROGRESS_HINT_TEXT).catch((error) => {
-        console.error("发送处理中提示失败:", getErrorMessage(error));
-      });
-    }
 
     // Step A: Read memory and profile from Bailian Memory Library.
     const memoryContext = await ai.readUserMemoryContext({
@@ -138,6 +165,8 @@ async function handlePrivateMessage(userId, message) {
   } catch (error) {
     console.error("业务逻辑出错:", getErrorMessage(error));
     await sendQQMessage(userId, "我这边暂时有点忙不过来，等会再聊。\n");
+  } finally {
+    progressHint.cancel();
   }
 }
 
