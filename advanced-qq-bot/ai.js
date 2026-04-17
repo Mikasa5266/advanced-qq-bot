@@ -60,6 +60,140 @@ function safeJsonStringify(value) {
   }
 }
 
+function logRawBailianResponse(method, url, payload) {
+  console.log(
+    `[Bailian RAW][${method}] ${url}\n${safeJsonStringify(payload || {})}`,
+  );
+  logToolCallProbe(payload);
+}
+
+function normalizeToolName(toolCall) {
+  return normalizeText(
+    (toolCall &&
+      (toolCall.name ||
+        (toolCall.function && toolCall.function.name) ||
+        toolCall.tool_name ||
+        toolCall.plugin_name ||
+        toolCall.api_name)) ||
+      "",
+  );
+}
+
+function normalizeToolArguments(toolCall) {
+  return (
+    (toolCall && toolCall.arguments) ||
+    (toolCall && toolCall.function && toolCall.function.arguments) ||
+    (toolCall && toolCall.parameters) ||
+    (toolCall && toolCall.input) ||
+    null
+  );
+}
+
+function normalizeToolOutput(toolCall) {
+  return (
+    (toolCall && toolCall.output) ||
+    (toolCall && toolCall.result) ||
+    (toolCall && toolCall.response) ||
+    null
+  );
+}
+
+function extractToolCalls(payload) {
+  const rows = [];
+  const seen = new Set();
+  const targetKeys = new Set(["tool_calls", "plugin_calls", "actions"]);
+
+  const pushToolCall = (item, sourcePath) => {
+    if (!item || typeof item !== "object") return;
+
+    const name = normalizeToolName(item);
+    const args = normalizeToolArguments(item);
+    const output = normalizeToolOutput(item);
+    const id = normalizeText(item.id || item.tool_call_id || "");
+
+    if (!name && args == null && output == null) {
+      return;
+    }
+
+    const fingerprint = `${sourcePath}|${id}|${name}|${safeJsonStringify(args)}|${safeJsonStringify(output)}`;
+    if (seen.has(fingerprint)) return;
+    seen.add(fingerprint);
+
+    rows.push({
+      sourcePath,
+      id,
+      name: name || "(unknown)",
+      arguments: args,
+      output,
+    });
+  };
+
+  const walk = (node, path = "root", depth = 0) => {
+    if (!node || depth > 8) return;
+
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => {
+        walk(item, `${path}[${index}]`, depth + 1);
+      });
+      return;
+    }
+
+    if (typeof node !== "object") return;
+
+    for (const [key, value] of Object.entries(node)) {
+      const currentPath = `${path}.${key}`;
+
+      if (targetKeys.has(key) && Array.isArray(value)) {
+        value.forEach((item, index) => {
+          pushToolCall(item, `${currentPath}[${index}]`);
+        });
+      }
+
+      walk(value, currentPath, depth + 1);
+    }
+  };
+
+  walk(payload);
+  return rows;
+}
+
+function logToolCallProbe(payload) {
+  const toolCalls = extractToolCalls(payload);
+
+  if (toolCalls.length === 0) {
+    console.log("[Bailian TOOL_CALLS] none");
+    return;
+  }
+
+  for (const row of toolCalls) {
+    const header =
+      `[Bailian TOOL_CALL] source=${row.sourcePath}` +
+      ` name=${row.name}` +
+      (row.id ? ` id=${row.id}` : "");
+    console.log(header);
+
+    if (row.arguments != null) {
+      console.log(`[Bailian TOOL_ARGS] ${safeJsonStringify(row.arguments)}`);
+    }
+
+    if (row.output != null) {
+      console.log(`[Bailian TOOL_OUTPUT] ${safeJsonStringify(row.output)}`);
+    }
+  }
+}
+
+function ensureAgentAppEndpointConfigured() {
+  const path = normalizeText(AGENT_COMPLETION_PATH).toLowerCase();
+  const hasAppsPath = path.includes("/apps/");
+  const isBaseModelPath = path.includes("/chat/completions");
+
+  if (!hasAppsPath || isBaseModelPath) {
+    throw new Error(
+      "BAILIAN_AGENT_COMPLETION_PATH 配置错误：必须使用 Agent App 接口（包含 /apps/），且不能是 /v1/chat/completions",
+    );
+  }
+}
+
 function toReadableMemoryLine(node) {
   if (typeof node === "string") {
     return normalizeText(node);
@@ -148,6 +282,47 @@ function memoryNodesToText(memoryNodes, maxItems = 8) {
     .join("\n");
 }
 
+function extractTextFromMessageContent(content) {
+  if (typeof content === "string") {
+    return normalizeText(content);
+  }
+
+  if (content && typeof content === "object" && !Array.isArray(content)) {
+    return extractTextFromMessageContent([content]);
+  }
+
+  const rows = Array.isArray(content) ? content : [];
+  const fragments = [];
+
+  for (const item of rows) {
+    if (typeof item === "string") {
+      const text = normalizeText(item);
+      if (text) fragments.push(text);
+      continue;
+    }
+
+    if (!item || typeof item !== "object") continue;
+
+    const text = normalizeText(item.text || item.content);
+    if (text) {
+      fragments.push(text);
+    }
+
+    const imageUrl = normalizeText(
+      (item.image_url && (item.image_url.url || item.image_url)) ||
+        item.image ||
+        item.imageUrl ||
+        item.url,
+    );
+
+    if (imageUrl && /^https?:\/\//i.test(imageUrl)) {
+      fragments.push(`![image](${imageUrl})`);
+    }
+  }
+
+  return fragments.join("\n").trim();
+}
+
 function extractAgentReply(payload) {
   const data = payload || {};
 
@@ -159,12 +334,27 @@ function extractAgentReply(payload) {
       ? data.output.choices
       : [];
 
+  const outputMessageText = extractTextFromMessageContent(
+    data && data.output && data.output.message && data.output.message.content,
+  );
+  if (outputMessageText) return outputMessageText;
+
+  const outputMessages =
+    data && data.output && Array.isArray(data.output.messages)
+      ? data.output.messages
+      : [];
+
+  for (const msg of outputMessages) {
+    const text = extractTextFromMessageContent(msg && msg.content);
+    if (text) return text;
+  }
+
   for (const choice of choices) {
-    const messageText = normalizeText(
-      choice &&
-        choice.message &&
-        (choice.message.content || choice.message.text || ""),
-    );
+    const messageText =
+      extractTextFromMessageContent(
+        choice && choice.message && choice.message.content,
+      ) ||
+      normalizeText(choice && choice.message && (choice.message.text || ""));
     if (messageText) return messageText;
   }
 
@@ -192,6 +382,7 @@ async function requestPost(pathTemplate, payload, replacements = {}) {
     headers: getCommonHeaders(),
     timeout: BAILIAN_TIMEOUT_MS,
   });
+  logRawBailianResponse("POST", url, response && response.data);
 
   return response && response.data ? response.data : {};
 }
@@ -205,6 +396,11 @@ async function requestGet(pathTemplate, params, replacements = {}) {
     headers: getCommonHeaders(),
     timeout: BAILIAN_TIMEOUT_MS,
   });
+  logRawBailianResponse(
+    "GET",
+    `${url}?${safeJsonStringify(params)}`,
+    response && response.data,
+  );
 
   return response && response.data ? response.data : {};
 }
@@ -321,6 +517,8 @@ function buildPromptWithContext(options = {}) {
 async function callAgentAppWithMemory(options = {}) {
   const userMessage = normalizeText(options.userMessage);
   if (!userMessage) return "";
+
+  ensureAgentAppEndpointConfigured();
 
   if (!BAILIAN_APP_ID) {
     throw new Error("缺少环境变量 BAILIAN_APP_ID");

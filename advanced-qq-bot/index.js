@@ -12,6 +12,7 @@ const NAPCAT_API_URL = process.env.NAPCAT_API_URL || "http://127.0.0.1:3000";
 const NAPCAT_TOKEN = process.env.NAPCAT_TOKEN || "";
 const WRITE_MEMORY_ASYNC =
   (process.env.BAILIAN_WRITE_MEMORY_ASYNC || "true") === "true";
+const MARKDOWN_IMAGE_REGEX = /!\[[^\]]*\]\((<)?(https?:\/\/[^\s)]+)(>)?\)/gi;
 
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -27,6 +28,16 @@ function getErrorMessage(error) {
     }
   }
   return error.message || "unknown error";
+}
+
+function convertMarkdownImagesToQQMessage(text) {
+  const source = normalizeText(text);
+  if (!source) return "";
+
+  return source.replace(
+    MARKDOWN_IMAGE_REGEX,
+    (_, _left, url) => `[CQ:image,file=${url}]`,
+  );
 }
 
 async function saveChatMessage(userId, role, content) {
@@ -45,6 +56,14 @@ async function saveChatMessage(userId, role, content) {
 
 async function sendQQMessage(userId, text) {
   try {
+    const normalized = normalizeText(text);
+    if (!normalized) return;
+
+    const qqMessage = convertMarkdownImagesToQQMessage(normalized);
+    if (qqMessage !== normalized) {
+      console.log("[图片转换] 检测到 Markdown 图片，已转换为 CQ 码发送");
+    }
+
     const headers = {};
     if (NAPCAT_TOKEN) {
       headers.Authorization = `Bearer ${NAPCAT_TOKEN}`;
@@ -54,7 +73,7 @@ async function sendQQMessage(userId, text) {
       `${NAPCAT_API_URL}/send_private_msg`,
       {
         user_id: Number(userId),
-        message: text,
+        message: qqMessage,
       },
       { headers },
     );
