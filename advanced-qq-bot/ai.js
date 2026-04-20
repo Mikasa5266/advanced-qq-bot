@@ -629,30 +629,6 @@ async function readUserMemoryContext(options = {}) {
   };
 }
 
-function buildPromptWithContext(options = {}) {
-  const userMessage = normalizeText(options.userMessage);
-  const memoryNodes = Array.isArray(options.memoryNodes)
-    ? options.memoryNodes
-    : [];
-  const profile = options.profile || null;
-
-  const sections = ["你是一个 QQ 聊天机器人，请自然、直接地回答用户问题。"];
-
-  const memoryText = memoryNodesToText(memoryNodes, 8);
-  if (memoryText) {
-    sections.push(`历史记忆:\n${memoryText}`);
-  }
-
-  const profileText = profileToText(profile);
-  if (profileText) {
-    sections.push(`用户画像:\n${profileText}`);
-  }
-
-  sections.push(`用户当前消息:\n${userMessage}`);
-
-  return sections.join("\n\n");
-}
-
 async function callAgentAppWithMemory(options = {}) {
   const userId = normalizeText(options.userId);
   const userMessage = normalizeText(options.userMessage);
@@ -664,17 +640,42 @@ async function callAgentAppWithMemory(options = {}) {
     throw new Error("缺少环境变量 BAILIAN_APP_ID");
   }
 
-  const prompt = buildPromptWithContext({
-    userMessage,
-    memoryNodes: options.memoryNodes,
-    profile: options.profile,
+  const memoryText = memoryNodesToText(
+    Array.isArray(options.memoryNodes) ? options.memoryNodes : [],
+    8,
+  );
+  const profileText = profileToText(options.profile || null);
+  const contextParts = [];
+
+  if (memoryText) {
+    contextParts.push(`历史记忆:\n${memoryText}`);
+  }
+
+  if (profileText) {
+    contextParts.push(`用户画像:\n${profileText}`);
+  }
+
+  const inputMessages = [];
+  if (contextParts.length > 0) {
+    inputMessages.push({
+      role: "system",
+      content: [
+        "【核心设定与记忆注入】\n请严格遵循你的人设和绑定的知识库进行回复，切勿暴露你是AI。",
+        ...contextParts,
+      ].join("\n\n"),
+    });
+  }
+
+  inputMessages.push({
+    role: "user",
+    content: userMessage,
   });
 
   const storedSessionId = getStoredSessionId(userId);
 
   const payload = {
     input: {
-      prompt,
+      messages: inputMessages,
     },
     parameters: {},
   };

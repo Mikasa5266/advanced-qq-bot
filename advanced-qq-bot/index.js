@@ -1,6 +1,8 @@
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
 const db = require("./db");
 const ai = require("./ai");
 
@@ -19,9 +21,16 @@ const PROGRESS_HINT_TEXT =
   "⏳ 正在思考并调用插件中，请稍候...";
 const PROGRESS_HINT_DELAY_MS = Math.max(
   0,
-  Number(process.env.BAILIAN_PROGRESS_HINT_DELAY_MS || 1500),
+  Number(process.env.BAILIAN_PROGRESS_HINT_DELAY_MS || 4000),
 );
 const MARKDOWN_IMAGE_REGEX = /!\[[^\]]*\]\((<)?(https?:\/\/[^\s)]+)(>)?\)/gi;
+const MEME_TAG_REGEX = /\[\[\s*表情\s*:\s*([^\]]+?)\s*\]\]/g;
+const MEME_CATEGORY_MAP = {
+  嘲笑: "laugh",
+  疑问: "question",
+};
+const MEME_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif"]);
+const MEMES_ROOT = path.resolve(__dirname, "..", "memes");
 
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -47,6 +56,51 @@ function convertMarkdownImagesToQQMessage(text) {
     MARKDOWN_IMAGE_REGEX,
     (_, _left, url) => `[CQ:image,file=${url}]`,
   );
+}
+
+function processMemeTags(text) {
+  const source = normalizeText(text);
+  if (!source) return "";
+
+  return source.replace(MEME_TAG_REGEX, (_full, rawCategory) => {
+    const category = normalizeText(rawCategory);
+    const folderName = MEME_CATEGORY_MAP[category];
+    if (!folderName) {
+      return "";
+    }
+
+    const folderPath = path.resolve(MEMES_ROOT, folderName);
+    try {
+      if (!fs.existsSync(folderPath)) {
+        return "";
+      }
+
+      const candidates = fs
+        .readdirSync(folderPath, { withFileTypes: true })
+        .filter(
+          (entry) =>
+            entry.isFile() &&
+            MEME_IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase()),
+        )
+        .map((entry) => path.resolve(folderPath, entry.name));
+
+      if (candidates.length === 0) {
+        return "";
+      }
+
+      const picked =
+        candidates[Math.floor(Math.random() * candidates.length)] || "";
+      if (!picked) {
+        return "";
+      }
+
+      const fileUri = `file:///${picked.replace(/\\/g, "/")}`;
+      return `[CQ:image,file=${fileUri}]`;
+    } catch (error) {
+      console.warn("[表情包转换] 读取本地表情包失败:", getErrorMessage(error));
+      return "";
+    }
+  });
 }
 
 async function saveChatMessage(userId, role, content) {
@@ -135,7 +189,7 @@ async function handlePrivateMessage(userId, message) {
     });
 
     // Step B: Call Bailian Agent App with current message + memory context.
-    const reply =
+    let reply =
       normalizeText(
         await ai.callAgentAppWithMemory({
           userId,
@@ -144,6 +198,8 @@ async function handlePrivateMessage(userId, message) {
           profile: memoryContext.profile,
         }),
       ) || "我刚刚有点走神了，你再发一次试试。";
+
+    reply = processMemeTags(reply);
 
     await saveChatMessage(userId, "assistant", reply);
     await sendQQMessage(userId, reply);
