@@ -721,6 +721,46 @@ async function callAgentAppWithMemory(options = {}) {
   return extractAgentReply(result);
 }
 
+async function sanityCheckAgentBinding(options = {}) {
+  ensureAgentAppEndpointConfigured();
+
+  if (!BAILIAN_APP_ID) {
+    throw new Error("缺少环境变量 BAILIAN_APP_ID");
+  }
+
+  const probePrompt = normalizeText(options.probePrompt) || "你是谁";
+  const expectedKeywords = Array.isArray(options.expectedKeywords)
+    ? options.expectedKeywords
+        .map((item) => normalizeText(item))
+        .filter(Boolean)
+    : [];
+
+  const payload = {
+    input: {
+      messages: [{ role: "user", content: probePrompt }],
+    },
+    parameters: {},
+  };
+
+  const result = await requestPost(AGENT_COMPLETION_PATH, payload, {
+    app_id: BAILIAN_APP_ID,
+  });
+
+  const reply = extractAgentReply(result);
+  const matchedKeywords = expectedKeywords.filter((keyword) =>
+    reply.includes(keyword),
+  );
+
+  return {
+    appId: BAILIAN_APP_ID,
+    probePrompt,
+    reply,
+    expectedKeywords,
+    matchedKeywords,
+    ok: expectedKeywords.length === 0 || matchedKeywords.length > 0,
+  };
+}
+
 async function writeConversationMemory(options = {}) {
   const userId = normalizeText(options.userId);
   const userMessage = normalizeText(options.userMessage);
@@ -764,5 +804,6 @@ async function writeConversationMemory(options = {}) {
 module.exports = {
   readUserMemoryContext,
   callAgentAppWithMemory,
+  sanityCheckAgentBinding,
   writeConversationMemory,
 };

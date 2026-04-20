@@ -1,4 +1,4 @@
-require("dotenv").config();
+require("dotenv").config({ override: true });
 const express = require("express");
 const axios = require("axios");
 const fs = require("fs");
@@ -31,6 +31,23 @@ const MEME_CATEGORY_MAP = {
 };
 const MEME_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif"]);
 const MEMES_ROOT = path.resolve(__dirname, "..", "memes");
+const BAILIAN_SANITY_CHECK_ENABLED =
+  (process.env.BAILIAN_SANITY_CHECK_ENABLED || "true") === "true";
+const BAILIAN_SANITY_CHECK_STRICT =
+  (process.env.BAILIAN_SANITY_CHECK_STRICT || "false") === "true";
+const BAILIAN_IDENTITY_CHECK_PROMPT =
+  process.env.BAILIAN_IDENTITY_CHECK_PROMPT || "你是谁";
+const BAILIAN_EXPECTED_IDENTITY_KEYWORDS = parseCsvKeywords(
+  process.env.BAILIAN_EXPECTED_IDENTITY_KEYWORDS,
+);
+
+function parseCsvKeywords(value) {
+  if (typeof value !== "string") return [];
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
 
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -173,6 +190,38 @@ function createProgressHintController(userId) {
   };
 }
 
+async function runBailianSanityCheck() {
+  if (!BAILIAN_SANITY_CHECK_ENABLED) {
+    return;
+  }
+
+  const result = await ai.sanityCheckAgentBinding({
+    probePrompt: BAILIAN_IDENTITY_CHECK_PROMPT,
+    expectedKeywords: BAILIAN_EXPECTED_IDENTITY_KEYWORDS,
+  });
+
+  const briefReply = normalizeText(result.reply).slice(0, 120);
+  console.log(
+    `[Bailian SANITY] app_id=${result.appId} prompt=${result.probePrompt}`,
+  );
+  console.log(`[Bailian SANITY] reply=${briefReply}`);
+
+  if (result.ok) {
+    return;
+  }
+
+  const expected = result.expectedKeywords.join(", ");
+  const warnMessage =
+    `[Bailian SANITY] 身份校验未命中预期关键词: ${expected}. ` +
+    "请确认控制台已发布最新版本，且 BAILIAN_APP_ID 指向当前应用。";
+
+  if (BAILIAN_SANITY_CHECK_STRICT) {
+    throw new Error(warnMessage);
+  }
+
+  console.warn(warnMessage);
+}
+
 async function handlePrivateMessage(userId, message) {
   const progressHint = createProgressHintController(userId);
   progressHint.start();
@@ -263,6 +312,20 @@ if (!NAPCAT_TOKEN) {
   console.warn("提示: 未设置 NAPCAT_TOKEN，将以无鉴权方式调用 NapCat");
 }
 
-app.listen(PORT, () => {
-  console.log(`Bot Server 监听端口 ${PORT}`);
+async function startServer() {
+  try {
+    await runBailianSanityCheck();
+  } catch (error) {
+    console.error("[Bailian SANITY] 启动前校验失败:", getErrorMessage(error));
+    process.exit(1);
+  }
+
+  app.listen(PORT, () => {
+    console.log(`Bot Server 监听端口 ${PORT}`);
+  });
+}
+
+startServer().catch((error) => {
+  console.error("服务启动失败:", getErrorMessage(error));
+  process.exit(1);
 });
