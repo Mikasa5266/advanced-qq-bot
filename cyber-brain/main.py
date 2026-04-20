@@ -1,51 +1,17 @@
+from contextlib import asynccontextmanager
+from typing import List, Optional
+
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
-from typing import List, Optional
-from contextlib import asynccontextmanager
-import os
-import threading
-from core.agent import get_agent, run_agent, summarize_tiered_memory
-from core.vector_memory import ingest_messages, search_memories
-from core.scavenging import (
-    ensure_scavenge_tables,
-    maybe_trigger_scavenge,
-    pull_pending_scavenge,
-    run_scavenge_scheduler,
-    update_user_activity,
-)
 
-agent = get_agent()
-scavenge_stop_event = threading.Event()
-scavenge_thread: threading.Thread | None = None
+from core.llm import call_bailian_agent
+from tools.meme_interceptor import process_ai_response
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global scavenge_thread
-    ensure_scavenge_tables()
-
-    scheduler_enabled = (
-        os.getenv("ENABLE_SCAVENGE_SCHEDULER") or "true"
-    ).lower() == "true"
-    if scheduler_enabled:
-        scavenge_stop_event.clear()
-        scavenge_thread = threading.Thread(
-            target=run_scavenge_scheduler,
-            args=(scavenge_stop_event,),
-            daemon=True,
-            name="scavenge-scheduler",
-        )
-        scavenge_thread.start()
-        print("[SCAVENGE] 后台拾荒调度器已启动")
-    else:
-        print("[SCAVENGE] 后台拾荒调度器已禁用")
-
-    try:
-        yield
-    finally:
-        scavenge_stop_event.set()
-        if scavenge_thread and scavenge_thread.is_alive():
-            scavenge_thread.join(timeout=3)
+    print("[BAILIAN] cyber-brain 服务已启动")
+    yield
 
 
 app = FastAPI(lifespan=lifespan)
@@ -126,26 +92,7 @@ def _format_history_lines(rows: List[HistoryMessage]) -> str:
     return "\n".join(lines)
 
 
-def _format_rag_lines(rows: List[dict]) -> str:
-    if not rows:
-        return ""
-
-    lines = []
-    for row in rows:
-        role = "你" if row.get("role") == "assistant" else "用户"
-        content = str(row.get("content") or "").strip()
-        created_at = str(row.get("created_at") or "").strip()
-        if not content:
-            continue
-        if created_at:
-            lines.append(f"[{created_at}] {role}: {content}")
-        else:
-            lines.append(f"{role}: {content}")
-
-    return "\n".join(lines)
-
-
-def _compose_user_input(req: ChatRequest, rag_rows: List[dict]) -> str:
+def _compose_user_input(req: ChatRequest) -> str:
     blocks = []
 
     if req.is_idle_long_time:
@@ -154,18 +101,16 @@ def _compose_user_input(req: ChatRequest, rag_rows: List[dict]) -> str:
     ctx = req.agent_context
     if ctx:
         context_parts = []
+
         if ctx.system_prompt.strip():
             context_parts.append(f"[系统设定]\n{ctx.system_prompt.strip()}")
+
         if ctx.memory_snippet.strip():
             context_parts.append(f"[用户记忆]\n{ctx.memory_snippet.strip()}")
 
         history_text = _format_history_lines(ctx.short_term_history)
         if history_text:
             context_parts.append(f"[最近对话]\n{history_text}")
-
-        rag_text = _format_rag_lines(rag_rows)
-        if rag_text and not ctx.memory_snippet.strip():
-            context_parts.append(f"[长期检索记忆]\n{rag_text}")
 
         if ctx.brief_reply:
             context_parts.append("[运行提示]\n本轮回复尽量简洁，但保持口语自然。")
@@ -179,80 +124,61 @@ def _compose_user_input(req: ChatRequest, rag_rows: List[dict]) -> str:
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
-    print(f"收到 Node.js 发来的消息: 用户 {req.user_id} 说: {req.message}")
-    print(f"该用户是否潜水很久: {req.is_idle_long_time}")
+    print(f"收到消息: 用户 {req.user_id} 说: {req.message}")
+    user_input = _compose_user_input(req)
 
-    rag_rows = search_memories(
-        user_id=req.user_id,
-        query=req.message,
-        top_k=int(os.getenv("VECTOR_RAG_TOP_K") or 6),
-        min_score=float(os.getenv("VECTOR_RAG_MIN_SCORE") or 0.2),
-    )
-
-    user_input = _compose_user_input(req, rag_rows)
-    reply = run_agent(agent, user_input)
-    return {"reply": reply}
+    raw_reply = await call_bailian_agent(user_input=user_input, user_id=req.user_id)
+    final_reply = process_ai_response(raw_reply)
+    return {"reply": final_reply}
 
 
 @app.post("/api/memory/summarize")
-async def summarize_memory_endpoint(req: MemorySummaryRequest):
-    result = summarize_tiered_memory(
-        dialogue_text=req.dialogue_text,
-        previous_summary=req.previous_summary,
-        max_chars=req.max_chars,
-        profile_max_items=req.profile_max_items,
-        recent_max_items=req.recent_max_items,
-    )
-    return result
+async def summarize_memory_endpoint(_: MemorySummaryRequest):
+    return {
+        "ok": False,
+        "summary": "",
+        "error": "memory summarize 已停用：当前已切换为百炼 Agent 会话模式",
+    }
 
 
 @app.post("/api/memory/ingest")
-async def ingest_memory_endpoint(req: MemoryIngestRequest):
-    payload = [
-        {
-            "role": row.role,
-            "content": row.content,
-            "created_at": row.created_at,
-        }
-        for row in req.messages
-    ]
-    result = ingest_messages(req.user_id, payload)
-    return result
+async def ingest_memory_endpoint(_: MemoryIngestRequest):
+    return {
+        "ok": False,
+        "error": "memory ingest 已停用：当前已切换为百炼 Agent 会话模式",
+    }
 
 
 @app.post("/api/memory/search")
-async def search_memory_endpoint(req: MemorySearchRequest):
-    items = search_memories(
-        user_id=req.user_id,
-        query=req.query,
-        top_k=req.top_k,
-        min_score=req.min_score,
-    )
-    return {"ok": True, "items": items}
+async def search_memory_endpoint(_: MemorySearchRequest):
+    return {
+        "ok": False,
+        "items": [],
+        "error": "memory search 已停用：当前已切换为百炼 Agent 会话模式",
+    }
 
 
 @app.post("/api/activity/update")
-async def update_activity_endpoint(req: ActivityUpdateRequest):
-    return update_user_activity(
-        user_id=req.user_id, last_message_at=req.last_message_at
-    )
+async def update_activity_endpoint(_: ActivityUpdateRequest):
+    return {"ok": True, "message": "activity update 已降级为 no-op"}
 
 
 @app.post("/api/scavenge/maybe-trigger")
-async def maybe_trigger_scavenge_endpoint(req: ScavengeTriggerRequest):
-    result = maybe_trigger_scavenge(
-        user_id=req.user_id,
-        idle_hours=req.idle_hours,
-        probability=req.probability,
-        force=req.force,
-    )
-    return result
+async def maybe_trigger_scavenge_endpoint(_: ScavengeTriggerRequest):
+    return {
+        "ok": True,
+        "triggered": False,
+        "message": "scavenge 已停用：当前模式不依赖本地调度器",
+    }
 
 
 @app.post("/api/scavenge/pull")
-async def pull_scavenge_endpoint(req: ScavengePullRequest):
-    item = pull_pending_scavenge(user_id=req.user_id, mark_delivered=req.mark_delivered)
-    return {"ok": True, "item": item}
+async def pull_scavenge_endpoint(_: ScavengePullRequest):
+    return {
+        "ok": True,
+        "item": None,
+        "message": "scavenge 已停用：当前模式不依赖本地调度器",
+    }
 
 
 if __name__ == "__main__":
